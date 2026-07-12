@@ -26,6 +26,8 @@ import json
 import csv
 import os
 import sys
+import shutil
+import subprocess
 import threading
 from datetime import datetime
 import time
@@ -110,6 +112,142 @@ def disable_autostart():
             os.unlink(path)
         except FileNotFoundError:
             pass
+
+
+# --- 每日 AI 報告(cron 排程 + config.py 自動補齊)---
+REPO_ROOT = os.path.expanduser("~/AquaMind")
+ANALYSIS_DIR = os.path.join(REPO_ROOT, "analysis")
+CONFIG_PY = os.path.join(ANALYSIS_DIR, "config.py")
+CONFIG_PY_EXAMPLE = os.path.join(ANALYSIS_DIR, "config.py.example")
+
+# cron 行內的識別字串(找它就知道有沒有裝過)
+CRON_TAG = "# aquamind-daily-report"
+
+
+def ensure_config_py():
+    """analysis/config.py 沒有就從 example cp 一份(daily_report.py 需要它)"""
+    if os.path.exists(CONFIG_PY):
+        return True, "config.py 已存在"
+    if not os.path.exists(CONFIG_PY_EXAMPLE):
+        return False, f"找不到 {CONFIG_PY_EXAMPLE},請先 git pull ~/AquaMind"
+    try:
+        shutil.copy(CONFIG_PY_EXAMPLE, CONFIG_PY)
+        return True, "已從 example 建立 config.py"
+    except Exception as e:
+        return False, f"複製失敗: {e}"
+
+
+def _get_crontab():
+    """讀當前 crontab,回傳 str;沒設過就回空字串。"""
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"], capture_output=True, text=True, timeout=5
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _write_crontab(content):
+    """寫回 crontab。"""
+    p = subprocess.Popen(["crontab", "-"], stdin=subprocess.PIPE, text=True)
+    p.communicate(content)
+    return p.returncode == 0
+
+
+def is_daily_report_enabled():
+    """看 crontab 有沒有裝過每日報告排程。"""
+    return CRON_TAG in _get_crontab()
+
+
+def enable_daily_report():
+    """在 crontab 加每天 08:00 跑 daily_report + ai_report_email 的行。"""
+    ok, msg = ensure_config_py()
+    if not ok:
+        raise RuntimeError(msg)
+
+    python_bin = sys.executable
+    env_file = CONFIG_ENV_FILE
+    cron_line = (
+        f"{CRON_TAG}\n"
+        f"0 8 * * * cd {ANALYSIS_DIR} && "
+        f". {env_file} 2>/dev/null; "
+        f"{python_bin} daily_report.py && "
+        f"{python_bin} ai_report_email.py "
+        f">> /tmp/aquamind_daily.log 2>&1\n"
+    )
+    current = _get_crontab()
+    # 若已有 tag,先移除舊的再加新的
+    if CRON_TAG in current:
+        current = _remove_daily_from_cron(current)
+    new_content = current.rstrip() + "\n" + cron_line
+    if not _write_crontab(new_content):
+        raise RuntimeError("crontab -e 寫入失敗")
+
+
+def _remove_daily_from_cron(content):
+    """從 crontab 內容移除帶 CRON_TAG 的區塊(tag 行 + 下一行)。"""
+    lines = content.split("\n")
+    out = []
+    skip_next = False
+    for line in lines:
+        if skip_next:
+            skip_next = False
+            continue
+        if CRON_TAG in line:
+            skip_next = True  # 跳過緊接著的排程行
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def disable_daily_report():
+    """從 crontab 移除每日報告排程。"""
+    current = _get_crontab()
+    if CRON_TAG not in current:
+        return
+    new_content = _remove_daily_from_cron(current)
+    if not _write_crontab(new_content):
+        raise RuntimeError("crontab -e 寫入失敗")
+
+
+def run_daily_report_once(callback):
+    """立刻手動跑一次 daily_report + ai_report_email(--no-email),
+    完成後呼叫 callback(success, output_snippet)。跑在 thread 避免 UI 卡住。"""
+    def worker():
+        try:
+            ok, msg = ensure_config_py()
+            if not ok:
+                callback(False, msg)
+                return
+            env = os.environ.copy()
+            # 從 aquamind_config.env 載入 API key 等
+            try:
+                with open(CONFIG_ENV_FILE) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("export "):
+                            line = line[7:]
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            env[k.strip()] = v.strip()
+            except FileNotFoundError:
+                pass
+            # 只跑 ai_report_email,--no-email 只驗證 Gemini 呼叫
+            result = subprocess.run(
+                [sys.executable, "ai_report_email.py", "--no-email"],
+                cwd=ANALYSIS_DIR,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            output = (result.stdout or "") + "\n" + (result.stderr or "")
+            callback(result.returncode == 0, output[-2000:])  # 尾巴 2000 字
+        except Exception as e:
+            callback(False, f"執行時例外: {type(e).__name__}: {e}")
+
+    threading.Thread(target=worker, daemon=True).start()
 
 # --- 序列 / 緩衝 ---
 BAUD_RATE = 9600
@@ -344,7 +482,7 @@ class AquaMindApp:
         settings_menu.add_command(label="離開", command=self._on_user_close)
         menubar.add_cascade(label="設定", menu=settings_menu)
 
-        # 啟動 — autostart + 自動重啟 切換
+        # 啟動 — autostart + 自動重啟 + 每日 AI 報告 切換
         startup_menu = tk.Menu(menubar, tearoff=0)
         self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
         startup_menu.add_checkbutton(
@@ -352,7 +490,15 @@ class AquaMindApp:
             variable=self.autostart_var,
             command=self._toggle_autostart,
         )
+        self.daily_report_var = tk.BooleanVar(value=is_daily_report_enabled())
+        startup_menu.add_checkbutton(
+            label="每日 AI 報告(每天 08:00 自動 email)",
+            variable=self.daily_report_var,
+            command=self._toggle_daily_report,
+        )
         startup_menu.add_separator()
+        startup_menu.add_command(label="立刻跑一次 AI 報告(測試)",
+                                  command=self._run_daily_report_now)
         startup_menu.add_command(label="說明 (自動啟動行為)", command=self._show_autostart_help)
         menubar.add_cascade(label="啟動", menu=startup_menu)
 
@@ -482,6 +628,51 @@ class AquaMindApp:
             "兩個檔的位置都在使用者家目錄,不會影響系統其他東西。\n"
             "隨時可以取消勾選還原成手動模式。"
         )
+
+    def _toggle_daily_report(self):
+        """切換每天 08:00 自動 AI 報告 email 排程。"""
+        try:
+            if self.daily_report_var.get():
+                enable_daily_report()
+                self.status_bar.config(text="已啟用每日 AI 報告(每天 08:00 自動 email)")
+                messagebox.showinfo(
+                    "已啟用每日 AI 報告",
+                    "已在 crontab 加入排程:每天 08:00 自動:\n"
+                    "  1. 讀取 CSV → 產生日報 HTML\n"
+                    "  2. 送資料給 Gemini 分析\n"
+                    "  3. Email 給你在「設定」填的收件人\n\n"
+                    "log 在 /tmp/aquamind_daily.log(可 cat 查)\n\n"
+                    "注意:記得也要在「設定」填好 Gemini API key + SMTP 才會實際寄出。"
+                )
+            else:
+                disable_daily_report()
+                self.status_bar.config(text="已停用每日 AI 報告")
+                messagebox.showinfo("已停用", "crontab 中的每日 AI 報告排程已移除。")
+        except Exception as e:
+            self.daily_report_var.set(is_daily_report_enabled())
+            messagebox.showerror("切換失敗", str(e))
+
+    def _run_daily_report_now(self):
+        """立刻跑一次 AI 報告(--no-email 模式)驗證 Gemini key 有效。"""
+        self.status_bar.config(text="正在跑 AI 報告測試,請等 10-30 秒…")
+
+        def on_done(success, output):
+            def show():
+                if success:
+                    self.status_bar.config(text="AI 報告測試完成 ✓")
+                    messagebox.showinfo(
+                        "AI 報告測試完成",
+                        f"執行成功。\n\n輸出尾巴:\n{output}"
+                    )
+                else:
+                    self.status_bar.config(text="AI 報告測試失敗,看訊息")
+                    messagebox.showerror(
+                        "AI 報告測試失敗",
+                        f"執行失敗。\n\n訊息:\n{output}"
+                    )
+            self.root.after(0, show)
+
+        run_daily_report_once(on_done)
 
     def _on_user_close(self):
         marker = os.path.expanduser("~/.gui_user_closed")
