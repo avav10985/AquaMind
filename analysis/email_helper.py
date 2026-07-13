@@ -37,9 +37,20 @@ def _get(env_key, fallback):
 
 
 def _resolve():
-    """整合 env + config.py,回傳當前設定。"""
+    """整合 env + config.py,回傳當前設定。
+
+    enabled 判斷:
+    - 若環境變數有給 SMTP_USER/PASSWORD/TO(GUI 設定寫入 aquamind_config.env),
+      就視為啟用 — 不再被 config.py 的舊 EMAIL_ENABLED 開關擋住。
+    - 否則回退看 config.py 的 EMAIL_ENABLED(舊版 Pi 相容)。
+    """
+    env_has_smtp = bool(
+        os.environ.get("SMTP_USER")
+        and os.environ.get("SMTP_PASSWORD")
+        and os.environ.get("SMTP_TO")
+    )
     return {
-        "enabled": _CFG_ENABLED,
+        "enabled": True if env_has_smtp else _CFG_ENABLED,
         "sender": _get("SMTP_USER", _CFG_SENDER),
         "password": _get("SMTP_PASSWORD", _CFG_PASSWORD),
         "receivers_raw": _get("SMTP_TO", _CFG_RECEIVER),
