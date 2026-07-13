@@ -285,7 +285,11 @@ def parse_env_file(path):
                     line = line[7:]
                 if '=' in line:
                     k, v = line.split('=', 1)
-                    result[k.strip()] = v.strip()
+                    v = v.strip()
+                    # 去掉包圍的單/雙引號(save_env_file 會加引號)
+                    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                        v = v[1:-1].replace("'\\''", "'")
+                    result[k.strip()] = v
     except FileNotFoundError:
         pass
     return result
@@ -300,7 +304,10 @@ def save_env_file(path, env_dict):
     ]
     for k, v in env_dict.items():
         if v:
-            lines.append(f"export {k}={v}")
+            # 用單引號包住值,避免值含 @ 空格 等字元讓 bash source 出錯;
+            # 值裡若本身有單引號,用 '\'' 轉義
+            safe_v = str(v).replace("'", "'\\''")
+            lines.append(f"export {k}='{safe_v}'")
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
     try:
