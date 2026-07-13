@@ -37,8 +37,11 @@ REDACT_PATTERNS = [
     (re.compile(r'https?://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec'), '[REDACTED-APPS-SCRIPT-URL]'),
     # Google Sheet URL(含 ID)
     (re.compile(r'https?://docs\.google\.com/spreadsheets/d/[A-Za-z0-9_-]+(?:/[^\s)]*)?'), '[REDACTED-SHEET-URL]'),
-    # 使用者 email(包含本人)
+    # 使用者 email(本人的多個帳號)
     (re.compile(r'aaron90407@gmail\.com', re.IGNORECASE), '[REDACTED-EMAIL]'),
+    (re.compile(r'avav10985@gmail\.com', re.IGNORECASE), '[REDACTED-EMAIL]'),
+    # 泛用 Gmail 位址(保險網,任何 xxx@gmail.com 都遮 — 最後一條避免蓋掉上面特定規則的語意)
+    (re.compile(r'[A-Za-z0-9._%+-]+@gmail\.com', re.IGNORECASE), '[REDACTED-EMAIL]'),
 ]
 
 
