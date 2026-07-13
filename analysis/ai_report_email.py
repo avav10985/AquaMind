@@ -102,23 +102,37 @@ def build_prompt(target_date, stats_text):
 控制在 250 字以內,直接寫,不要客套也不要重複數據。"""
 
 
+class _Usage:
+    """讓回傳值跟舊 SDK 的 usage_metadata 介面相容"""
+    def __init__(self, prompt_tokens=0, candidates_tokens=0):
+        self.prompt_token_count = prompt_tokens
+        self.candidates_token_count = candidates_tokens
+
+
 def call_gemini(prompt):
-    """呼叫 Gemini API。沒裝 google-generativeai 或沒 API key → 回 None"""
+    """呼叫 Gemini REST API(只用 requests,不依賴 google-generativeai SDK)。
+    沒 API key → 回 None。SDK 在 Python 3.8 版本地獄裝不到堪用版,故走 REST。"""
     if not API_KEY:
         return None
+    import requests
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{MODEL}:generateContent?key={API_KEY}")
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": MAX_TOKENS},
+    }
     try:
-        import google.generativeai as genai
-    except ImportError:
-        print("⚠ 缺 google-generativeai 套件,執行: pip install google-generativeai")
-        return None
-    try:
-        genai.configure(api_key=API_KEY)
-        model = genai.GenerativeModel(MODEL)
-        response = model.generate_content(
-            prompt,
-            generation_config={"max_output_tokens": MAX_TOKENS},
-        )
-        return response.text, response.usage_metadata
+        r = requests.post(url, json=payload, timeout=60)
+        if r.status_code != 200:
+            print(f"Gemini API 錯誤: HTTP {r.status_code} {r.text[:200]}")
+            return None
+        data = r.json()
+        # 取回文字
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        # token 用量(有就填,沒有就 0)
+        um = data.get("usageMetadata", {})
+        usage = _Usage(um.get("promptTokenCount", 0), um.get("candidatesTokenCount", 0))
+        return text, usage
     except Exception as e:
         print(f"Gemini API 錯誤: {e}")
         return None
