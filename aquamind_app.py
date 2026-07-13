@@ -221,26 +221,19 @@ def run_daily_report_once(callback):
                 callback(False, msg)
                 return
             env = os.environ.copy()
-            # 從 aquamind_config.env 載入 API key 等
-            try:
-                with open(CONFIG_ENV_FILE) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("export "):
-                            line = line[7:]
-                        if "=" in line and not line.startswith("#"):
-                            k, v = line.split("=", 1)
-                            env[k.strip()] = v.strip()
-            except FileNotFoundError:
-                pass
-            # 只跑 ai_report_email,--no-email 只驗證 Gemini 呼叫
+            # 從 aquamind_config.env 載入 API key 等(用 parse_env_file 才會去引號)
+            for k, v in parse_env_file(CONFIG_ENV_FILE).items():
+                env[k] = v
+            # 真的跑完整流程並寄信。明確傳「今天」日期(ai_report_email 不帶參數是抓昨天,
+            # Jetson 剛啟用可能昨天沒資料 → 傳今天日期字串抓當天資料)
+            today_str = datetime.now().strftime("%Y-%m-%d")
             result = subprocess.run(
-                [sys.executable, "ai_report_email.py", "--no-email"],
+                [sys.executable, "ai_report_email.py", today_str],
                 cwd=ANALYSIS_DIR,
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=180,
             )
             output = (result.stdout or "") + "\n" + (result.stderr or "")
             callback(result.returncode == 0, output[-2000:])  # 尾巴 2000 字
